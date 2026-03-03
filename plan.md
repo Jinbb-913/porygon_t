@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-创建一个类似 Ralph 的自主 AI Agent，专门用于自动生成 Python 项目的测试代码。
+这是一个AI 自主测试的 Agent，专门用于自动生成 Python 项目的测试代码。
 
 **核心思想**：
 - 编排层：Python 脚本 (`porygon_t.py`)
@@ -32,15 +32,15 @@ porygon_t/
 │   └── report.py             # 报告生成
 └── reports/                  # 报告目录（自动生成）
     └── 20260303_143052_a1b2c3d/   # 按时间_commitId 命名
-        ├── test_plan_program_<name>.md       # test_programs 指定程序的测试方案（自动生成）
+        ├── test_plan_program_<file_name>.md       # test_programs 指定程序的测试方案（自动生成）
         ├── test_plan_case_<file_name>.md     # 修改的文件1的测试方案（自动生成）
         ├── test_plan_case_<file_name>.md     # 修改的文件2的测试方案（自动生成）
         ├── summary_report.md                 # 总体测试报告
         └── detail/
-            ├──program_<name>
-            |  ├──program_<name>_summary.md
-            |  ├──program_<name>_report.md
-            |  ├──program_<name>_config.json # 自动生成
+            ├──program_<file_name>
+            |  ├──program_<file_name>_summary.md
+            |  ├──program_<file_name>_report.md
+            |  ├──program_<file_name>_config.json # 自动生成
             |  └── fig/      
             ├──<file_name>
             |  ├──<file_name>_summary.md
@@ -71,6 +71,7 @@ project-src/
 ```
 
 ### 1.1 test_plan.json 结构（全局配置）
+这个配置文件由用户说明
 
 ```json
 {
@@ -83,8 +84,8 @@ project-src/
   },
   "test_programs": [
     {
-      "name": "calculator",
-      "path": "examples/calculator.py",
+      "file_name": "<file_name>",
+      "file_path": "/path/to/file_folder/<file_name>",
       "issues": ["<告诉大模型应该注意的点>"]
     }
   ],
@@ -103,12 +104,38 @@ project-src/
 - `test_programs`: 自定义需要测试的程序列表（可选）
 - `execution`: 执行配置
 
-### 1.2 自动生成program_<name>_config.json 和 <file_name>_config.json
-# TODO 完善文件结构和字段说明，其中program_<name>_config.json就是test_plan.json，"test_programs"的信息
+### 1.2 自动生成配置文件结构
 
-### 1.3 test_plan_program_<name>.md和test_plan_case_<file_name>.md应该执行的工作
+#### 1.2.1 `program_<file_name>`
 
-### 1.4 program_<name>_report.md和 <file_name>_report.md
+##### 1.2.1.1 `program_<file_name>_config.json`
+该文件确定指定的文件和指定文件的测试用例的存储位置
+
+```json
+{
+  "file_name": "<file_name>",
+  "file_path": "/path/to/file_folder/<file_name>",
+  "test_file_path": "/path/to/file_folder/test/test_<name>.py",
+  "issues": ["<告诉大模型应该注意的点>"]
+}
+```
+
+**字段说明**：
+- `file_name`: 程序名称（来自 test_plan.json）
+- `file_path`: 文件路径（来自 test_plan.json）
+- `test_file_path`: 该文件的测试程序路径
+- `issues`: 用户配置的留言（来自 test_plan.json）
+
+---
+
+##### 1.2.1.2 `program_<file_name>_summary.md`
+# TODO 补充
+
+##### 1.2.1.3 `program_<file_name>_report.md`
+# TODO 补充
+
+#### 1.2.2 `<file_name>_config`
+
 
 
 ---
