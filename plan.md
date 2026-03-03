@@ -38,17 +38,20 @@ porygon_t/
         ├── summary_report.md                 # 总体测试报告
         └── detail/
             ├──program_<name>
+            |  ├──program_<name>_summary.md
             |  ├──program_<name>_report.md
             |  ├──program_<name>_config.json # 自动生成
             |  └── fig/      
             ├──<file_name>
+            |  ├──<file_name>_summary.md
             |  ├──<file_name>_report.md
             |  ├──<file_name>_config.json # 自动生成
             |  └── fig/    
             ├──<file_name>
-                ├──<file_name>_report.md
-             |  ├──program_<name>_config.json # 自动生成
-                └── fig/              
+            |  ├──<file_name>_summary.md
+            |  ├──<file_name>_report.md
+            |  ├──<file_name>_config.json # 自动生成
+            |  └── fig/            
 ```
 
 ### 生成的测试文件结构（示例）
