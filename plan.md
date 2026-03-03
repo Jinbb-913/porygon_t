@@ -145,7 +145,7 @@ project-src/
 ---
 
 ##### 1.2.1.3 `program_<file_name>_report.md`
-该文件基于 `program_<file_name>_summary.md` 由 LLM 生成的综合分析报告, 包含`./fig`中的结果
+该文件基于 `program_<file_name>_summary.md` 由 Claude 生成的综合分析报告, 包含`./fig`中的结果
 
 **内容结构**：
 - **被测代码分析**：函数/类结构、输入输出、关键逻辑
@@ -207,7 +207,7 @@ project-src/
 ---
 
 ##### 1.2.2.3 `<file_name>_report.md`
-该文件基于 `<file_name>_summary.md` 由 LLM 生成的综合分析报告，包含`./fig`中的结果
+该文件基于 `<file_name>_summary.md` 由 Claude 生成的综合分析报告，包含`./fig`中的结果
 
 **内容结构**：
 - **Diff 分析**：具体修改内容、新增/删除的逻辑、影响面评估
@@ -222,7 +222,7 @@ project-src/
 
 #### 1.3.1 `test_plan_program_<file_name>.md`
 
-该文件由 LLM 基于 `program_<file_name>_config.json` 自动生成，包含针对用户指定程序的详细测试方案设计。
+该文件由 Claude 基于 `program_<file_name>_config.json` 自动生成，包含针对用户指定程序的详细测试方案设计。
 
 **生成流程**：
 1. 读取 `program_<file_name>_config.json` 获取 `file_path` 和 `issues`
@@ -232,7 +232,7 @@ project-src/
    - 外部依赖（导入的其他模块）
    - 边界条件和异常处理点
 3. 分析 `issues` 中用户指定的关注点
-4. 调用 LLM 生成完整测试方案
+4. 调用 Claude 生成完整测试方案
 
 **内容结构**：
 - **被测程序分析**：
@@ -251,7 +251,7 @@ project-src/
 
 #### 1.3.2 `test_plan_case_<file_name>.md`
 
-该文件由 LLM 基于 `<file_name>_config.json` 自动生成，包含针对 commit diff 修改文件的测试方案设计。
+该文件由 Claude 基于 `<file_name>_config.json` 自动生成，包含针对 commit diff 修改文件的测试方案设计。
 
 **生成流程**：
 1. 读取 `<file_name>_config.json` 获取 `file_path` 和 `diff_info`
@@ -262,7 +262,7 @@ project-src/
    - 边界条件和异常处理点
 3. 执行 `git diff <commit_id>` 获取具体变更内容
 4. 分析变更影响：新增/删除/修改的代码行、关联函数、潜在副作用
-5. 调用 LLM 生成针对变更的测试方案
+5. 调用 Claude 生成针对变更的测试方案
 
 **内容结构**：
 - **变更分析**：
@@ -281,22 +281,93 @@ project-src/
   - 回归测试（验证未变更的功能完整性）
 ---
 
-## 2. 输入输出设计
+## 2. 程序流程总体设计
 
-### 2.1 输入（Agent 读取）
+本节描述 Agent 的整体工作流程和核心算法框架。Agent 采用**多阶段流水线**设计，从输入解析到测试生成执行，各阶段松耦合、可独立运行。
 
-### 2.2 输出（Agent 产生）
+**流程概览**：
+1. **初始化阶段**：读取 `test_plan.json`，解析用户配置
+2. **发现阶段**：基于 commit_id 获取变更文件，合并 `test_programs` 自定义文件
+3. **计划阶段**：为每个目标文件生成测试方案（test_plan_*.md）
+4. **生成阶段**：基于测试方案生成/更新测试代码
+5. **执行阶段**：运行测试，收集结果和覆盖率数据
+6. **报告阶段**：生成摘要和详细分析报告
 
-
-## 4. 经验保存与复用
-
-### 4.1 保存到 reports/<timestamp_commit_id>/test_progress.txt
-
-### 4.2 复用方式
+各阶段通过文件系统传递状态，支持断点续跑和增量更新。
 
 ---
 
-## 5. 测试报告设计
+### 2.1 Agent 总体算法框架
+
+Agent 的核心是一个**事件驱动的状态机**，主循环协调多个工作线程并行处理测试任务。
+
+**算法伪代码**：
+
+```python
+def main():
+    # 1. 初始化
+    config = load_test_plan("test_plan.json")
+    workers = config.execution.maxWorkers
+
+    # 2. 发现待测试文件
+    targets = []
+    targets += get_commit_diff_files(config.commit_id)      # commit diff 文件
+    targets += config.test_programs                          # 用户指定文件
+
+    ## 2.1 生成program_<file_name>_config.json和<file_name>_config.json
+
+    # 3. 生成测试方案（可并行）
+    plans = []
+    for target in targets:
+        plan = generate_test_plan(target)    # 调用 Claude 生成 test_plan_*.md
+        plans.append(plan)
+
+    # 4. 生成/更新测试代码（可并行）
+    for plan in plans:
+        if test_file_exists(plan.test_file_path):
+            update_tests(plan)               # 增量更新现有测试
+        else:
+            generate_tests(plan)             # 创建新测试文件
+
+    # 5. 执行测试（可并行），执行之后会生成测试_summary.md
+    results = []
+    for plan in plans:
+        result = run_tests(plan.test_file_path)
+        result.create_summary()
+        result.create_report() # 调用Claude模型生成 program_<file_name>_report.md或者<file_name>_report.md
+        results.append(result)
+
+    # 6. 生成报告（调用 Claude）
+    generate_summary_report(results)
+```
+
+**关键设计决策**：
+
+| 设计点 | 决策 | 理由 |
+|--------|------|------|
+| 并行粒度 | 文件级并行 | 不同文件的测试相互独立，易于并行化 |
+| 状态持久化 | 文件系统 | 每个阶段输出独立文件，支持断点续跑 |
+| 增量更新 | 测试文件存在性检查 | 避免重复生成，支持持续迭代 |
+| Claude 调用 | 阶段级批量调用 | 减少上下文切换，提高生成质量 |
+
+
+### 2.2 输入（Agent 读取）
+输入文件为`test_plan.json`
+
+### 2.3 输出`summary_report.md`
+
+
+
+## 3. 保存与经验复用
+
+### 3.1 保存到 reports/<timestamp_commit_id>/test_progress.txt
+
+### 3.2 复用方式 
+# 读取或者写入./lesson/文件夹
+
+---
+
+## 4. 测试报告设计
 
 
 ---
