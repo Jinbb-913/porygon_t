@@ -1,0 +1,24 @@
+{
+  "project": "ExampleProject",
+  "commit_id": "f385dea",
+  "branch": "master",
+  "project_path": "E:/project/example_project",
+  "claude_config": {
+    "timeoutSeconds": 300
+  },
+  "test_programs": [
+    {
+      "file_name": "calculator.py",
+      "file_path": "E:/project/example_project/src/calculator.py",
+      "issues": [
+        "注意除法时除数为0的边界条件",
+        "验证链式调用Calculator类的功能",
+        "测试负数输入的处理"
+      ]
+    }
+  ],
+  "execution": {
+    "mode": "parallel",
+    "maxWorkers": 2
+  }
+}
