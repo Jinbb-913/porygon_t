@@ -411,42 +411,129 @@ class PorygonT:
 
         return success_count
 
+    MAX_RETRIES = 3  # 最大重试次数
+
     def _run_tests(self, target: TestTarget) -> bool:
-        """执行测试"""
+        """执行测试，失败时自动修复并重试"""
         if not target.test_file_path.exists():
             logger.warning(f"测试文件不存在: {target.test_file_path}")
             return False
 
-        logger.info(f"执行测试: {target.file_name} (语言: {target.language})")
+        for attempt in range(self.MAX_RETRIES + 1):
+            success, error_info = self._execute_single_test(target)
 
+            if success:
+                if attempt > 0:
+                    logger.info(f"[{target.file_name}] 修复成功，测试通过")
+                return True
+
+            if attempt >= self.MAX_RETRIES:
+                logger.error(f"[{target.file_name}] 达到最大重试次数 ({self.MAX_RETRIES})")
+                return False
+
+            logger.warning(f"[{target.file_name}] 测试失败，尝试修复 ({attempt + 1}/{self.MAX_RETRIES})")
+            if not self._fix_test_code(target, error_info):
+                return False
+
+        return False
+
+    def _execute_single_test(self, target: TestTarget) -> tuple[bool, str]:
+        """执行单次测试，返回 (是否成功, 错误信息)"""
         try:
-            # 根据语言选择测试运行器
-            if target.language == 'cpp':
-                from script.test_runner import CppTestRunner
-                runner = CppTestRunner(
-                    target.test_file_path,
-                    Path(self.config['project_path']),
-                    target_file=Path(target.file_path)
-                )
-            else:
-                runner = TestRunner(
-                    target.test_file_path,
-                    Path(self.config['project_path'])
-                )
-
+            runner = self._create_runner(target)
             result = runner.run(
                 with_coverage=True,
                 coverage_target=Path(target.file_path),
                 timeout=self.config.get('claude_config', {}).get('timeoutSeconds', 300)
             )
-            runner.generate_summary(target.summary_path)
-            # 通过标准：失败率 < 10% 或 没有错误（允许少量失败）
-            if result.total == 0:
-                return False
-            failure_rate = (result.failed + result.errors) / result.total
-            return failure_rate <= 0.1
+            runner.generate_summary(target.summary_path, target_file=target.file_path)
+
+            return self._evaluate_result(result)
+
         except Exception as e:
-            logger.error(f"执行测试失败 [{target.file_name}]: {e}")
+            error_msg = f"执行测试异常: {e}"
+            logger.error(f"[{target.file_name}] {error_msg}")
+            return False, error_msg
+
+    def _create_runner(self, target: TestTarget):
+        """创建对应语言的测试运行器"""
+        project_path = Path(self.config['project_path'])
+
+        if target.language == 'cpp':
+            from script.test_runner import CppTestRunner
+            return CppTestRunner(target.test_file_path, project_path, target_file=Path(target.file_path))
+        return TestRunner(target.test_file_path, project_path)
+
+    def _evaluate_result(self, result) -> tuple[bool, str]:
+        """评估测试结果"""
+        if result.total == 0:
+            return False, "测试收集失败：没有收集到任何测试用例"
+
+        failure_rate = (result.failed + result.errors) / result.total
+        if failure_rate <= 0.1:
+            return True, ""
+
+        error_info = self._format_error_info(result)
+        return False, error_info
+
+    def _format_error_info(self, result) -> str:
+        """格式化错误信息"""
+        lines = []
+        for case in result.cases:
+            if case.status in ('failed', 'error'):
+                lines.append(f"\n测试用例: {case.name}")
+                lines.append(f"状态: {case.status}")
+                if case.message:
+                    lines.append(f"错误: {case.message[:200]}")
+                if case.traceback:
+                    lines.append(f"堆栈:\n{case.traceback[:1000]}")
+        return '\n'.join(lines) if lines else "未知错误"
+
+    def _fix_test_code(self, target: TestTarget, error_info: str) -> bool:
+        """调用 Claude 修复测试代码"""
+        try:
+            current_code = target.test_file_path.read_text(encoding='utf-8')
+        except Exception as e:
+            logger.error(f"读取测试文件失败: {e}")
+            return False
+
+        # 构建修复提示词
+        prompt = f"""请修复以下 {target.language} 测试代码中的错误。
+
+被测文件: {target.file_path}
+测试文件: {target.test_file_path}
+
+【错误信息】
+```
+{error_info[:1500]}
+```
+
+【当前代码】
+```{target.language}
+{current_code[:2500]}
+```
+
+【修复要求】
+1. 分析并修复导致测试失败的问题
+2. 确保代码可以直接运行通过
+3. 修正导入路径或函数签名不匹配问题
+
+只输出修复后的完整代码，不要其他解释。"""
+
+        try:
+            output = self.claude.call(prompt=prompt, files=[Path(target.file_path)])
+            code = self.claude._extract_code_block(output)
+
+            if not code.strip():
+                logger.error("Claude 返回的修复代码为空")
+                return False
+
+            target.test_file_path.write_text(code, encoding='utf-8')
+            logger.info(f"测试代码已修复: {target.test_file_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"调用 Claude 修复失败: {e}")
             return False
 
     def _generate_reports(self) -> bool:
@@ -544,7 +631,12 @@ class PorygonT:
         logger.info("=" * 50)
 
         success_count = self._run_parallel(self._run_tests, "执行测试")
-        logger.info(f"测试执行完成: {success_count}/{len(self.targets)} 通过")
+        total = len(self.targets)
+        logger.info(f"测试执行完成: {success_count}/{total} 通过")
+
+        if success_count < total:
+            logger.warning(f"有 {total - success_count} 个目标测试失败或修复失败")
+
         return True  # 即使部分失败也继续
 
     def report(self) -> bool:

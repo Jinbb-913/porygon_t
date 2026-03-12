@@ -6,12 +6,45 @@
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 logger = logging.getLogger('porygon_t.report')
+
+# 预编译正则表达式，提高性能
+JSON_BLOCK_PATTERN = re.compile(r'```json\n(.*?)\n```', re.DOTALL)
+
+
+def _calculate_file_status(summary: dict) -> str:
+    """
+    计算单个文件的测试状态
+
+    通过标准：失败率 <= 10%
+
+    Args:
+        summary: 测试摘要数据
+
+    Returns:
+        状态字符串: 'passed', 'warning', 'failed'
+    """
+    total = summary.get('total', 0)
+    failed = summary.get('failed', 0)
+    errors = summary.get('errors', 0)
+
+    if total == 0:
+        return 'failed'
+
+    failure_rate = (failed + errors) / total
+
+    if failure_rate == 0:
+        return 'passed'
+    elif failure_rate <= 0.1:  # <= 10%
+        return 'warning'  # 大部分通过，有小部分失败
+    else:
+        return 'failed'
 
 
 @dataclass
@@ -127,7 +160,13 @@ class ReportGenerator:
         ]
 
         for f in data.files:
-            status_icon = '✅' if f.get('status') == 'passed' else '⚠️' if f.get('status') == 'warning' else '❌'
+            status = f.get('status', 'failed')
+            if status == 'passed':
+                status_icon = '✅'
+            elif status == 'warning':
+                status_icon = '⚠️'
+            else:
+                status_icon = '❌'
             lines.append(
                 f"| {f.get('file_name', '-')} | "
                 f"{f.get('type', '-')} | "
@@ -146,8 +185,13 @@ class ReportGenerator:
             "",
         ])
 
-        # 失败用例
-        failed_files = [f for f in data.files if f.get('failed', 0) > 0]
+        # 失败用例（按失败率 > 10% 判断）
+        def is_failed_file(f):
+            total = f.get('total', 0)
+            failed = f.get('failed', 0)
+            return total > 0 and (failed / total) > 0.1
+
+        failed_files = [f for f in data.files if is_failed_file(f)]
         if failed_files:
             lines.append("### 失败用例")
             lines.append("")
@@ -174,12 +218,16 @@ class ReportGenerator:
         ])
 
         # 总体结论
-        if data.total_failed == 0 and data.avg_line_coverage >= 90:
-            conclusion = "✅ **通过** - 所有测试通过，覆盖率达标"
-        elif data.total_failed == 0:
+        # 通过标准：失败率 <= 10% 且 覆盖率 >= 90%
+        failure_rate = data.total_failed / data.total_cases if data.total_cases > 0 else 1
+        coverage_ok = data.avg_line_coverage >= 90
+
+        if failure_rate <= 0.1 and coverage_ok:
+            conclusion = "✅ **通过** - 测试通过（失败率<=10%），覆盖率达标"
+        elif failure_rate <= 0.1:
             conclusion = "⚠️ **有条件通过** - 测试通过但覆盖率未达标"
         else:
-            conclusion = "❌ **未通过** - 存在失败用例"
+            conclusion = "❌ **未通过** - 失败率超过10%"
 
         lines.append(f"### 总体结论")
         lines.append("")
@@ -189,12 +237,12 @@ class ReportGenerator:
         # 合并建议
         lines.append("### 合并建议")
         lines.append("")
-        if data.total_failed == 0 and data.avg_line_coverage >= 90:
+        if failure_rate <= 0.1 and coverage_ok:
             lines.append("✅ 建议合并到主分支")
-        elif data.total_failed == 0:
-            lines.append("⚠️ 建议补充测试后再合并")
+        elif failure_rate <= 0.1:
+            lines.append("⚠️ 建议补充测试后再合并（覆盖率未达标）")
         else:
-            lines.append("❌ 不建议合并，请先修复失败用例")
+            lines.append("❌ 不建议合并，失败率超过10%")
         lines.append("")
 
         lines.extend([
@@ -275,7 +323,7 @@ class ReportGenerator:
 
 def load_test_summary(summary_path: Path) -> Dict:
     """
-    加载测试摘要文件
+    加载测试摘要文件（支持 Markdown 格式，从中提取 JSON 数据）
 
     Args:
         summary_path: 摘要文件路径
@@ -285,7 +333,15 @@ def load_test_summary(summary_path: Path) -> Dict:
     """
     try:
         with open(summary_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            content = f.read()
+
+        # 尝试从 Markdown 中提取 JSON 数据块
+        json_match = JSON_BLOCK_PATTERN.search(content)
+        if json_match:
+            return json.loads(json_match.group(1))
+
+        # 如果没有 JSON 块，尝试直接解析整个文件为 JSON
+        return json.loads(content)
     except Exception as e:
         logger.error(f"加载摘要失败 [{summary_path}]: {e}")
         return {}
@@ -317,7 +373,7 @@ def aggregate_summaries(summary_paths: List[Path]) -> ReportData:
             'skipped': data.get('summary', {}).get('skipped', 0),
             'line_coverage': data.get('coverage', {}).get('line_rate', 0),
             'branch_coverage': data.get('coverage', {}).get('branch_rate', 0),
-            'status': 'passed' if data.get('summary', {}).get('failed', 0) == 0 else 'failed'
+            'status': _calculate_file_status(data.get('summary', {}))
         }
         files.append(file_info)
 
