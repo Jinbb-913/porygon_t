@@ -12,6 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+# 导入常量
+from constants import CoverageTarget
+
 logger = logging.getLogger('porygon_t.report')
 
 # 预编译正则表达式，提高性能
@@ -22,7 +25,7 @@ def _calculate_file_status(summary: dict) -> str:
     """
     计算单个文件的测试状态
 
-    通过标准：失败率 <= 10%
+    通过标准：失败率 <= MAX_FAILURE_RATE
 
     Args:
         summary: 测试摘要数据
@@ -41,7 +44,7 @@ def _calculate_file_status(summary: dict) -> str:
 
     if failure_rate == 0:
         return 'passed'
-    elif failure_rate <= 0.1:  # <= 10%
+    elif failure_rate <= CoverageTarget.MAX_FAILURE_RATE:
         return 'warning'  # 大部分通过，有小部分失败
     else:
         return 'failed'
@@ -185,11 +188,11 @@ class ReportGenerator:
             "",
         ])
 
-        # 失败用例（按失败率 > 10% 判断）
+        # 失败用例（按失败率 > MAX_FAILURE_RATE 判断）
         def is_failed_file(f):
             total = f.get('total', 0)
             failed = f.get('failed', 0)
-            return total > 0 and (failed / total) > 0.1
+            return total > 0 and (failed / total) > CoverageTarget.MAX_FAILURE_RATE
 
         failed_files = [f for f in data.files if is_failed_file(f)]
         if failed_files:
@@ -200,9 +203,9 @@ class ReportGenerator:
             lines.append("")
 
         # 低覆盖率文件
-        low_coverage = [f for f in data.files if f.get('line_coverage', 0) < 90]
+        low_coverage = [f for f in data.files if f.get('line_coverage', 0) < int(CoverageTarget.LINE_RATE * 100)]
         if low_coverage:
-            lines.append("### 低覆盖率文件 (< 90%)")
+            lines.append(f"### 低覆盖率文件 (< {int(CoverageTarget.LINE_RATE * 100)}%)")
             lines.append("")
             for f in low_coverage:
                 lines.append(
@@ -218,16 +221,16 @@ class ReportGenerator:
         ])
 
         # 总体结论
-        # 通过标准：失败率 <= 10% 且 覆盖率 >= 90%
+        # 通过标准：失败率 <= MAX_FAILURE_RATE 且 覆盖率 >= LINE_RATE
         failure_rate = data.total_failed / data.total_cases if data.total_cases > 0 else 1
-        coverage_ok = data.avg_line_coverage >= 90
+        coverage_ok = data.avg_line_coverage >= int(CoverageTarget.LINE_RATE * 100)
 
-        if failure_rate <= 0.1 and coverage_ok:
-            conclusion = "✅ **通过** - 测试通过（失败率<=10%），覆盖率达标"
-        elif failure_rate <= 0.1:
+        if failure_rate <= CoverageTarget.MAX_FAILURE_RATE and coverage_ok:
+            conclusion = f"✅ **通过** - 测试通过（失败率<={int(CoverageTarget.MAX_FAILURE_RATE * 100)}%），覆盖率达标"
+        elif failure_rate <= CoverageTarget.MAX_FAILURE_RATE:
             conclusion = "⚠️ **有条件通过** - 测试通过但覆盖率未达标"
         else:
-            conclusion = "❌ **未通过** - 失败率超过10%"
+            conclusion = f"❌ **未通过** - 失败率超过{int(CoverageTarget.MAX_FAILURE_RATE * 100)}%"
 
         lines.append(f"### 总体结论")
         lines.append("")
@@ -237,12 +240,12 @@ class ReportGenerator:
         # 合并建议
         lines.append("### 合并建议")
         lines.append("")
-        if failure_rate <= 0.1 and coverage_ok:
+        if failure_rate <= CoverageTarget.MAX_FAILURE_RATE and coverage_ok:
             lines.append("✅ 建议合并到主分支")
-        elif failure_rate <= 0.1:
+        elif failure_rate <= CoverageTarget.MAX_FAILURE_RATE:
             lines.append("⚠️ 建议补充测试后再合并（覆盖率未达标）")
         else:
-            lines.append("❌ 不建议合并，失败率超过10%")
+            lines.append(f"❌ 不建议合并，失败率超过{int(CoverageTarget.MAX_FAILURE_RATE * 100)}%")
         lines.append("")
 
         lines.extend([
@@ -347,7 +350,7 @@ def load_test_summary(summary_path: Path) -> Dict:
         return {}
 
 
-def aggregate_summaries(summary_paths: List[Path]) -> ReportData:
+def aggregate_summaries(summary_paths: List[Path]) -> List[Dict]:
     """
     聚合多个测试摘要
 

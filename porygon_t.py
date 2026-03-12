@@ -22,7 +22,16 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
+
+# 导入常量
+from constants import (
+    ConfigKey,
+    CoverageTarget,
+    Defaults,
+    FileExtension,
+    Language,
+)
 
 # 导入工具模块
 from script import (
@@ -46,40 +55,32 @@ logging.basicConfig(
 logger = logging.getLogger('porygon_t')
 
 
-# 支持的文件扩展名
-SUPPORTED_EXTENSIONS = {'.py', '.cpp', '.cc', '.cxx', '.hpp', '.h'}
-PYTHON_EXTENSIONS = {'.py'}
-# C++ 源文件扩展名（头文件不单独测试）
-CPP_SOURCE_EXTENSIONS = {'.cpp', '.cc', '.cxx'}
-CPP_HEADER_EXTENSIONS = {'.hpp', '.h'}
-CPP_EXTENSIONS = CPP_SOURCE_EXTENSIONS | CPP_HEADER_EXTENSIONS
+# 为向后兼容保留别名
+SUPPORTED_EXTENSIONS = FileExtension.SUPPORTED
+PYTHON_EXTENSIONS = FileExtension.PYTHON
+CPP_SOURCE_EXTENSIONS = FileExtension.CPP_SOURCE
+CPP_HEADER_EXTENSIONS = FileExtension.CPP_HEADER
+CPP_EXTENSIONS = FileExtension.CPP
 
-
+# 为向后兼容保留函数
 def get_file_extension(file_name: str) -> str:
     """获取文件扩展名"""
-    for ext in sorted(SUPPORTED_EXTENSIONS, key=len, reverse=True):
-        if file_name.endswith(ext):
-            return ext
-    return Path(file_name).suffix
+    return FileExtension.get_file_extension(file_name)
 
 
 def is_python_file(file_name: str) -> bool:
     """判断是否为 Python 文件"""
-    return any(file_name.endswith(ext) for ext in PYTHON_EXTENSIONS)
+    return FileExtension.is_python(file_name)
 
 
 def is_cpp_file(file_name: str) -> bool:
     """判断是否为 C++ 源文件（头文件不单独测试）"""
-    return any(file_name.endswith(ext) for ext in CPP_SOURCE_EXTENSIONS)
+    return FileExtension.is_cpp_source(file_name)
 
 
 def get_source_language(file_name: str) -> str:
     """获取源文件语言类型"""
-    if is_python_file(file_name):
-        return 'python'
-    elif is_cpp_file(file_name):
-        return 'cpp'
-    return 'unknown'
+    return FileExtension.get_language(file_name)
 
 
 class TestTarget:
@@ -159,7 +160,7 @@ class PorygonT:
 
         # 初始化 Claude 客户端
         project_path = Path(self.config.get('project_path', '.'))
-        timeout = self.config.get('claude_config', {}).get('timeoutSeconds', 300)
+        timeout = self.config.get(ConfigKey.CLAUDE_CONFIG, {}).get(ConfigKey.TIMEOUT_SECONDS, Defaults.TIMEOUT_SECONDS)
         self.claude = ClaudeClient(project_path, Path('prompt.md'), timeout)
 
         self.start_time: Optional[datetime] = None
@@ -395,7 +396,7 @@ class PorygonT:
 
     def _run_parallel(self, func: Callable[[TestTarget], bool], stage_name: str) -> int:
         """并行执行目标处理函数"""
-        max_workers = self.config.get('execution', {}).get('maxWorkers', 4)
+        max_workers = self.config.get(ConfigKey.EXECUTION, {}).get(ConfigKey.MAX_WORKERS, Defaults.MAX_WORKERS)
         success_count = 0
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -437,14 +438,14 @@ class PorygonT:
 
         return False
 
-    def _execute_single_test(self, target: TestTarget) -> tuple[bool, str]:
+    def _execute_single_test(self, target: TestTarget) -> Tuple[bool, str]:
         """执行单次测试，返回 (是否成功, 错误信息)"""
         try:
             runner = self._create_runner(target)
             result = runner.run(
                 with_coverage=True,
                 coverage_target=Path(target.file_path),
-                timeout=self.config.get('claude_config', {}).get('timeoutSeconds', 300)
+                timeout=self.config.get(ConfigKey.CLAUDE_CONFIG, {}).get(ConfigKey.TIMEOUT_SECONDS, Defaults.TIMEOUT_SECONDS)
             )
             runner.generate_summary(target.summary_path, target_file=target.file_path)
 
@@ -464,13 +465,13 @@ class PorygonT:
             return CppTestRunner(target.test_file_path, project_path, target_file=Path(target.file_path))
         return TestRunner(target.test_file_path, project_path)
 
-    def _evaluate_result(self, result) -> tuple[bool, str]:
+    def _evaluate_result(self, result) -> Tuple[bool, str]:
         """评估测试结果"""
         if result.total == 0:
             return False, "测试收集失败：没有收集到任何测试用例"
 
         failure_rate = (result.failed + result.errors) / result.total
-        if failure_rate <= 0.1:
+        if failure_rate <= CoverageTarget.MAX_FAILURE_RATE:
             return True, ""
 
         error_info = self._format_error_info(result)

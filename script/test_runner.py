@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import xml.etree.ElementTree as ET
 
+# 导入常量
+from constants import CoverageTarget
+
 logger = logging.getLogger('porygon_t.runner')
 
 # 线程锁，用于保护 matplotlib 图表生成（pyplot 不是线程安全的）
@@ -35,6 +38,10 @@ def generate_coverage_chart(coverage_data: Dict, output_path: Path) -> bool:
     Returns:
         是否成功
     """
+    # 获取阈值
+    line_target = int(CoverageTarget.LINE_RATE * 100)
+    branch_target = int(CoverageTarget.BRANCH_RATE * 100)
+
     # 使用线程锁保护 matplotlib 操作（pyplot 不是线程安全的）
     with _chart_lock:
         try:
@@ -49,17 +56,17 @@ def generate_coverage_chart(coverage_data: Dict, output_path: Path) -> bool:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
 
             # 行覆盖率饼图
-            colors1 = ['#4CAF50', '#FFC107'] if line_rate >= 90 else ['#FFC107', '#F44336']
+            colors1 = ['#4CAF50', '#FFC107'] if line_rate >= line_target else ['#FFC107', '#F44336']
             ax1.pie([line_rate, 100 - line_rate], labels=[f'Covered\n{line_rate:.1f}%', f'Uncovered\n{100-line_rate:.1f}%'],
                     colors=colors1, autopct='', startangle=90)
-            ax1.set_title('Line Coverage (Target: >=90%)', fontsize=12, fontweight='bold')
+            ax1.set_title(f'Line Coverage (Target: >={line_target}%)', fontsize=12, fontweight='bold')
 
             # 分支覆盖率饼图
             if branch_rate > 0:
-                colors2 = ['#4CAF50', '#FFC107'] if branch_rate >= 85 else ['#FFC107', '#F44336']
+                colors2 = ['#4CAF50', '#FFC107'] if branch_rate >= branch_target else ['#FFC107', '#F44336']
                 ax2.pie([branch_rate, 100 - branch_rate], labels=[f'Covered\n{branch_rate:.1f}%', f'Uncovered\n{100-branch_rate:.1f}%'],
                         colors=colors2, autopct='', startangle=90)
-                ax2.set_title('Branch Coverage (Target: >=85%)', fontsize=12, fontweight='bold')
+                ax2.set_title(f'Branch Coverage (Target: >={branch_target}%)', fontsize=12, fontweight='bold')
             else:
                 ax2.text(0.5, 0.5, 'Branch coverage\nnot available', ha='center', va='center', fontsize=10)
                 ax2.set_title('Branch Coverage', fontsize=12, fontweight='bold')
@@ -338,137 +345,213 @@ class TestRunner:
 
     def generate_summary(self, output_path: Path, target_file: Optional[str] = None) -> bool:
         """生成测试摘要文件（Markdown格式，符合plan.md要求）"""
-        line_rate = self.result.coverage.get('line_rate', 0)
-        branch_rate = self.result.coverage.get('branch_rate', 0)
-        lines_covered = self.result.coverage.get('lines_covered', 0)
-        lines_total = self.result.coverage.get('lines_total', 0)
-        missing_lines = self.result.coverage.get('missing_lines', [])
+        lines = _format_test_summary(self.result, target_file, language='python')
+        return _write_summary_file(output_path, self.result, lines)
 
-        # 判断测试结论 - 标准：失败率 <= 10%
-        failure_rate = 0 if self.result.total == 0 else (self.result.failed + self.result.errors) / self.result.total
-        if failure_rate <= 0.1 and line_rate >= 0.9:
-            conclusion = "✅ 通过"
-        elif failure_rate <= 0.1:
-            conclusion = "⚠️ 有条件通过"
+
+def _format_test_summary(
+    result: TestResult,
+    target_file: Optional[str],
+    language: str = 'python'
+) -> List[str]:
+    """
+    格式化测试摘要为 Markdown 行列表
+
+    Args:
+        result: 测试结果
+        target_file: 被测文件路径
+        language: 语言类型 ('python' 或 'cpp')
+
+    Returns:
+        Markdown 行列表
+    """
+    line_rate = result.coverage.get('line_rate', 0)
+    branch_rate = result.coverage.get('branch_rate', 0)
+    lines_covered = result.coverage.get('lines_covered', 0)
+    lines_total = result.coverage.get('lines_total', 0)
+    missing_lines = result.coverage.get('missing_lines', [])
+
+    is_cpp = language == 'cpp'
+
+    # 判断测试结论 - 标准：失败率 <= MAX_FAILURE_RATE
+    failure_rate = 0 if result.total == 0 else (result.failed + result.errors) / result.total
+    if failure_rate <= CoverageTarget.MAX_FAILURE_RATE and line_rate >= CoverageTarget.LINE_RATE:
+        conclusion = "✅ 通过"
+    elif failure_rate <= CoverageTarget.MAX_FAILURE_RATE and not is_cpp:
+        conclusion = "⚠️ 有条件通过"
+    elif failure_rate <= CoverageTarget.MAX_FAILURE_RATE:
+        conclusion = "✅ 通过"
+    else:
+        conclusion = "❌ 未通过"
+
+    # 标题
+    title_suffix = " (C++)" if is_cpp else ""
+    lines = [
+        f"# 测试摘要 - {Path(result.test_file).name}{title_suffix}",
+        "",
+        "## 程序基本信息",
+        "",
+        f"- **测试文件**: `{result.test_file}`",
+        f"- **被测文件**: `{target_file or 'N/A'}`",
+    ]
+
+    # C++ 特有信息
+    if is_cpp:
+        lines.extend([
+            f"- **编程语言**: C++",
+            f"- **测试框架**: Google Test",
+        ])
+
+    lines.extend([
+        f"- **测试时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- **执行耗时**: {result.duration:.2f} 秒",
+        "",
+        "---",
+        "",
+        "## 测试用例统计",
+        "",
+        "| 指标 | 数值 |",
+        "|------|------|",
+        f"| 总用例数 | {result.total} |",
+        f"| 通过 | {result.passed} ({result.success_rate:.1f}%) |",
+        f"| 失败 | {result.failed} |",
+        f"| 错误 | {result.errors} |",
+        f"| 跳过 | {result.skipped} |",
+        "",
+        "---",
+        "",
+        "## 测试覆盖率",
+        "",
+        "| 指标 | 数值 | 目标 | 状态 |",
+        "|------|------|------|------|",
+        f"| 行覆盖率 | {line_rate:.1%} | ≥ {int(CoverageTarget.LINE_RATE * 100)}% | {'✅' if line_rate >= CoverageTarget.LINE_RATE else '⚠️'} |",
+        f"| 分支覆盖率 | {branch_rate:.1%} | ≥ {int(CoverageTarget.BRANCH_RATE * 100)}% | {'✅' if branch_rate >= CoverageTarget.BRANCH_RATE else '⚠️'} |",
+    ])
+
+    # Python 特有：覆盖行数详情
+    if not is_cpp:
+        lines.append(f"| 覆盖行数 | {lines_covered} / {lines_total} | - | - |")
+
+    lines.extend(["",])
+
+    # Python 特有：未覆盖行信息
+    if not is_cpp and missing_lines:
+        lines.extend([
+            "### 未覆盖行",
+            "",
+            f"```\n{', '.join(map(str, missing_lines[:50]))}{'...' if len(missing_lines) > 50 else ''}\n```",
+            "",
+        ])
+
+    # 用例详情表头
+    lines.extend([
+        "---",
+        "",
+        "## 测试用例详情",
+        "",
+    ])
+
+    if is_cpp:
+        lines.append("| 用例名称 | 状态 | 耗时(ms) |")
+        lines.append("|----------|------|----------|")
+    else:
+        lines.append("| 用例名称 | 状态 | 耗时(ms) | 说明 |")
+        lines.append("|----------|------|----------|------|")
+
+    # 用例详情
+    for case in result.cases:
+        status_icon = {'passed': '✅', 'failed': '❌', 'error': '💥', 'skipped': '⏭️'}.get(case.status, '❓')
+        duration_ms = case.duration * 1000
+        if is_cpp:
+            lines.append(f"| {case.name} | {status_icon} {case.status} | {duration_ms:.1f} |")
         else:
-            conclusion = "❌ 未通过"
-
-        lines = [
-            f"# 测试摘要 - {Path(self.result.test_file).name}",
-            "",
-            "## 程序基本信息",
-            "",
-            f"- **测试文件**: `{self.result.test_file}`",
-            f"- **被测文件**: `{target_file or 'N/A'}`",
-            f"- **测试时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"- **执行耗时**: {self.result.duration:.2f} 秒",
-            "",
-            "---",
-            "",
-            "## 测试用例统计",
-            "",
-            "| 指标 | 数值 |",
-            "|------|------|",
-            f"| 总用例数 | {self.result.total} |",
-            f"| 通过 | {self.result.passed} ({self.result.success_rate:.1f}%) |",
-            f"| 失败 | {self.result.failed} |",
-            f"| 错误 | {self.result.errors} |",
-            f"| 跳过 | {self.result.skipped} |",
-            "",
-            "---",
-            "",
-            "## 测试覆盖率",
-            "",
-            "| 指标 | 数值 | 目标 | 状态 |",
-            "|------|------|------|------|",
-            f"| 行覆盖率 | {line_rate:.1%} | ≥ 90% | {'✅' if line_rate >= 0.9 else '⚠️'} |",
-            f"| 分支覆盖率 | {branch_rate:.1%} | ≥ 85% | {'✅' if branch_rate >= 0.85 else '⚠️'} |",
-            f"| 覆盖行数 | {lines_covered} / {lines_total} | - | - |",
-            "",
-        ]
-
-        # 添加未覆盖行信息
-        if missing_lines:
-            lines.extend([
-                "### 未覆盖行",
-                "",
-                f"```\n{', '.join(map(str, missing_lines[:50]))}{'...' if len(missing_lines) > 50 else ''}\n```",
-                "",
-            ])
-
-        lines.extend([
-            "---",
-            "",
-            "## 测试用例详情",
-            "",
-            "| 用例名称 | 状态 | 耗时(ms) | 说明 |",
-            "|----------|------|----------|------|",
-        ])
-
-        for case in self.result.cases:
-            status_icon = {'passed': '✅', 'failed': '❌', 'error': '💥', 'skipped': '⏭️'}.get(case.status, '❓')
             message = case.message[:30] + '...' if case.message and len(case.message) > 30 else (case.message or '')
-            lines.append(f"| {case.name} | {status_icon} {case.status} | {case.duration*1000:.1f} | {message} |")
+            lines.append(f"| {case.name} | {status_icon} {case.status} | {duration_ms:.1f} | {message} |")
 
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 测试结论",
-            "",
-            f"**总体评估**: {conclusion}",
-            "",
-            "### 关键发现",
-            "",
-        ])
+    # 测试结论
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 测试结论",
+        "",
+        f"**总体评估**: {conclusion}",
+        "",
+        "### 关键发现",
+        "",
+    ])
 
-        if self.result.failed > 0:
-            lines.append(f"- ❌ 存在 {self.result.failed} 个失败用例，需要修复")
-        if line_rate < 0.9:
-            lines.append(f"- ⚠️ 行覆盖率 {line_rate:.1%} 未达到 90% 目标")
-        if branch_rate < 0.85 and branch_rate > 0:
-            lines.append(f"- ⚠️ 分支覆盖率 {branch_rate:.1%} 未达到 85% 目标")
-        if self.result.failed == 0 and line_rate >= 0.9:
-            lines.append("- ✅ 所有测试通过，覆盖率达标")
+    if result.failed > 0:
+        lines.append(f"- ❌ 存在 {result.failed} 个失败用例，需要修复")
+    if line_rate < CoverageTarget.LINE_RATE and not is_cpp:
+        lines.append(f"- ⚠️ 行覆盖率 {line_rate:.1%} 未达到 {int(CoverageTarget.LINE_RATE * 100)}% 目标")
+    if branch_rate < CoverageTarget.BRANCH_RATE and branch_rate > 0 and not is_cpp:
+        lines.append(f"- ⚠️ 分支覆盖率 {branch_rate:.1%} 未达到 {int(CoverageTarget.BRANCH_RATE * 100)}% 目标")
+    if result.failed == 0 and (is_cpp or line_rate >= CoverageTarget.LINE_RATE):
+        lines.append("- ✅ 所有测试通过" + ("，覆盖率达标" if not is_cpp else ""))
 
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 原始数据",
-            "",
-            "```json",
-            json.dumps({
-                'test_file': self.result.test_file,
-                'summary': {
-                    'total': self.result.total,
-                    'passed': self.result.passed,
-                    'failed': self.result.failed,
-                    'skipped': self.result.skipped,
-                    'errors': self.result.errors,
-                    'duration': self.result.duration,
-                    'success_rate': self.result.success_rate
-                },
-                'coverage': self.result.coverage
-            }, indent=2, ensure_ascii=False),
-            "```",
-            "",
-        ])
+    # JSON 数据
+    json_data = {
+        'test_file': result.test_file,
+        'summary': {
+            'total': result.total,
+            'passed': result.passed,
+            'failed': result.failed,
+            'skipped': result.skipped,
+            'errors': result.errors,
+            'duration': result.duration,
+            'success_rate': result.success_rate
+        },
+        'coverage': result.coverage,
+    }
+    if is_cpp:
+        json_data['language'] = 'cpp'
 
-        try:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text('\n'.join(lines), encoding='utf-8')
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 原始数据",
+        "",
+        "```json",
+        json.dumps(json_data, indent=2, ensure_ascii=False),
+        "```",
+        "",
+    ])
 
-            # 生成覆盖率图表
-            if self.result.coverage:
-                fig_dir = output_path.parent / 'fig'
-                chart_path = fig_dir / 'coverage_chart.png'
-                generate_coverage_chart(self.result.coverage, chart_path)
+    return lines
 
-            return True
-        except Exception as e:
-            logger.error(f"生成摘要失败: {e}")
-            return False
+
+def _write_summary_file(
+    output_path: Path,
+    result: TestResult,
+    lines: List[str]
+) -> bool:
+    """
+    将摘要写入文件并生成图表
+
+    Args:
+        output_path: 输出文件路径
+        result: 测试结果（用于生成图表）
+        lines: Markdown 行列表
+
+    Returns:
+        是否成功
+    """
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text('\n'.join(lines), encoding='utf-8')
+
+        # 生成覆盖率图表
+        if result.coverage:
+            fig_dir = output_path.parent / 'fig'
+            chart_path = fig_dir / 'coverage_chart.png'
+            generate_coverage_chart(result.coverage, chart_path)
+
+        return True
+    except Exception as e:
+        logger.error(f"生成摘要失败: {e}")
+        return False
 
 
 def run_single_test(test_file: Path, project_path: Optional[Path] = None,
@@ -702,114 +785,5 @@ class CppTestRunner:
 
     def generate_summary(self, output_path: Path, target_file: Optional[str] = None) -> bool:
         """生成测试摘要文件（Markdown格式，符合plan.md要求）"""
-        line_rate = self.result.coverage.get('line_rate', 0)
-        branch_rate = self.result.coverage.get('branch_rate', 0)
-
-        # 判断测试结论 - 标准：失败率 <= 10%
-        failure_rate = 0 if self.result.total == 0 else (self.result.failed + self.result.errors) / self.result.total
-        if failure_rate <= 0.1:
-            conclusion = "✅ 通过"
-        else:
-            conclusion = "❌ 未通过"
-
-        lines = [
-            f"# 测试摘要 - {Path(self.result.test_file).name} (C++)",
-            "",
-            "## 程序基本信息",
-            "",
-            f"- **测试文件**: `{self.result.test_file}`",
-            f"- **被测文件**: `{target_file or 'N/A'}`",
-            f"- **编程语言**: C++",
-            f"- **测试框架**: Google Test",
-            f"- **测试时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"- **执行耗时**: {self.result.duration:.2f} 秒",
-            "",
-            "---",
-            "",
-            "## 测试用例统计",
-            "",
-            "| 指标 | 数值 |",
-            "|------|------|",
-            f"| 总用例数 | {self.result.total} |",
-            f"| 通过 | {self.result.passed} ({self.result.success_rate:.1f}%) |",
-            f"| 失败 | {self.result.failed} |",
-            f"| 错误 | {self.result.errors} |",
-            f"| 跳过 | {self.result.skipped} |",
-            "",
-            "---",
-            "",
-            "## 测试覆盖率",
-            "",
-            "| 指标 | 数值 | 目标 | 状态 |",
-            "|------|------|------|------|",
-            f"| 行覆盖率 | {line_rate:.1%} | ≥ 90% | {'✅' if line_rate >= 0.9 else '⚠️'} |",
-            f"| 分支覆盖率 | {branch_rate:.1%} | ≥ 85% | {'✅' if branch_rate >= 0.85 else '⚠️'} |",
-            "",
-            "---",
-            "",
-            "## 测试用例详情",
-            "",
-            "| 用例名称 | 状态 | 耗时(ms) |",
-            "|----------|------|----------|",
-        ]
-
-        for case in self.result.cases:
-            status_icon = {'passed': '✅', 'failed': '❌', 'error': '💥', 'skipped': '⏭️'}.get(case.status, '❓')
-            lines.append(f"| {case.name} | {status_icon} {case.status} | {case.duration*1000:.1f} |")
-
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 测试结论",
-            "",
-            f"**总体评估**: {conclusion}",
-            "",
-            "### 关键发现",
-            "",
-        ])
-
-        if self.result.failed > 0:
-            lines.append(f"- ❌ 存在 {self.result.failed} 个失败用例，需要修复")
-        if self.result.failed == 0:
-            lines.append("- ✅ 所有测试通过")
-
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 原始数据",
-            "",
-            "```json",
-            json.dumps({
-                'test_file': self.result.test_file,
-                'summary': {
-                    'total': self.result.total,
-                    'passed': self.result.passed,
-                    'failed': self.result.failed,
-                    'skipped': self.result.skipped,
-                    'errors': self.result.errors,
-                    'duration': self.result.duration,
-                    'success_rate': self.result.success_rate
-                },
-                'coverage': self.result.coverage,
-                'language': 'cpp'
-            }, indent=2, ensure_ascii=False),
-            "```",
-            "",
-        ])
-
-        try:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text('\n'.join(lines), encoding='utf-8')
-
-            # 生成覆盖率图表
-            if self.result.coverage:
-                fig_dir = output_path.parent / 'fig'
-                chart_path = fig_dir / 'coverage_chart.png'
-                generate_coverage_chart(self.result.coverage, chart_path)
-
-            return True
-        except Exception as e:
-            logger.error(f"生成摘要失败: {e}")
-            return False
+        lines = _format_test_summary(self.result, target_file, language='cpp')
+        return _write_summary_file(output_path, self.result, lines)

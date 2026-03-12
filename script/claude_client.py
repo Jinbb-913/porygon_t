@@ -11,6 +11,8 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from constants import FileExtension, Language
+
 logger = logging.getLogger('porygon_t.claude')
 
 
@@ -66,9 +68,7 @@ class ClaudeClient:
                 sections.append(f"\n--- 文件: {file_path} ---\n")
                 # 根据文件扩展名确定代码块语言
                 ext = file_path.suffix.lower()
-                lang_map = {'.py': 'python', '.cpp': 'cpp', '.cc': 'cpp',
-                           '.cxx': 'cpp', '.hpp': 'cpp', '.h': 'cpp'}
-                lang = lang_map.get(ext, '')
+                lang = FileExtension.get_language(str(file_path))
                 sections.append(f"```{lang}\n{content}\n```\n")
             except Exception as e:
                 logger.warning(f"读取文件失败 {file_path}: {e}")
@@ -99,9 +99,13 @@ class ClaudeClient:
         # 将文件内容嵌入到 prompt 中
         full_prompt = self._embed_files_in_prompt(prompt, files)
 
-        logger.info(f"调用 Claude: {prompt[:50]}...")
+        # 避免在 info 级别记录完整 prompt（可能包含敏感信息）
+        logger.info("调用 Claude API...")
+        logger.debug(f"Prompt 前50字符: {prompt[:50]}...")
         if files:
-            logger.info(f"嵌入文件: {[str(f) for f in files if f and f.exists()]}")
+            file_list = [str(f) for f in files if f and f.exists()]
+            logger.info(f"嵌入 {len(file_list)} 个文件")
+            logger.debug(f"嵌入文件详情: {file_list}")
 
         try:
             # 公司内网一般在linux使用
